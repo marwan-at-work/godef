@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -38,12 +39,14 @@ var cpuprofile = flag.String("cpuprofile", "", "write CPU profile to this file")
 var memprofile = flag.String("memprofile", "", "write memory profile to this file")
 var traceFlag = flag.String("trace", "", "write trace log to this file")
 
-func fail(s string, a ...interface{}) {
-	fmt.Fprint(os.Stderr, "godef: "+fmt.Sprintf(s, a...)+"\n")
-	os.Exit(2)
+func main() {
+	if err := run(context.Background()); err != nil {
+		fmt.Fprintf(os.Stderr, "godef: %v\n", err)
+		os.Exit(2)
+	}
 }
 
-func main() {
+func run(ctx context.Context) error {
 	debugpkg.SetGCPercent(1600)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: godef [flags] [expr]\n")
@@ -55,17 +58,17 @@ func main() {
 		os.Exit(2)
 	}
 	if flag.NArg() > 0 {
-		fail("Expressions not yet supported `%v`", flag.Arg(0))
+		return fmt.Errorf("Expressions not yet supported `%v`", flag.Arg(0))
 	}
 	//TODO: types.Debug = *debug
 
 	if *cpuprofile != "" {
 		f, err := os.Create(*cpuprofile)
 		if err != nil {
-			log.Fatal(err)
+			return err
 		}
 		if err := pprof.StartCPUProfile(f); err != nil {
-			log.Fatal(err)
+			return err
 		}
 		// NB: profile won't be written in case of error.
 		defer pprof.StopCPUProfile()
@@ -74,10 +77,10 @@ func main() {
 	if *traceFlag != "" {
 		f, err := os.Create(*traceFlag)
 		if err != nil {
-			log.Fatal(err)
+			return err
 		}
 		if err := trace.Start(f); err != nil {
-			log.Fatal(err)
+			return err
 		}
 		// NB: trace log won't be written in case of error.
 		defer func() {
@@ -89,7 +92,7 @@ func main() {
 	if *memprofile != "" {
 		f, err := os.Create(*memprofile)
 		if err != nil {
-			log.Fatal(err)
+			return err
 		}
 		// NB: memprofile won't be written in case of error.
 		defer func() {
@@ -111,13 +114,13 @@ func main() {
 	if *acmeFlag {
 		var err error
 		if afile, err = acmeCurrentFile(); err != nil {
-			fail("%v", err)
+			return fmt.Errorf("%v", err)
 		}
 		filename, src, searchpos = afile.name, afile.body, afile.offset
 	} else if filename == "" {
 		// TODO if there's no filename, look in the current
 		// directory and do something plausible.
-		fail("A filename must be specified")
+		return fmt.Errorf("A filename must be specified")
 	} else if *readStdin {
 		src, _ = ioutil.ReadAll(os.Stdin)
 	}
@@ -126,44 +129,21 @@ func main() {
 		flag.Usage()
 		os.Exit(2)
 	}
-	parser, result := parseFile(filename, src, searchpos)
 	// Load, parse, and type-check the packages named on the command line.
 	cfg := &packages.Config{
-		Mode:      packages.LoadSyntax,
-		Tests:     strings.HasSuffix(filename, "_test.go"),
-		ParseFile: parser,
+		Context: ctx,
+		Tests:   strings.HasSuffix(filename, "_test.go"),
 	}
-	lpkgs, err := packages.Load(cfg, "contains:"+filename)
+	fset, obj, err := godef(cfg, filename, src, searchpos)
 	if err != nil {
-		fail("%v", err)
-	}
-	if len(lpkgs) < 1 {
-		fail("There must be at least one package that contains the file")
-	}
-	// get the node
-	var o ast.Node
-	select {
-	case o = <-result:
-	default:
-		fail("no node found at search pos")
-	}
-	if o == nil {
-		fail("Specified offset was not a valid location")
+		return err
 	}
 	// print old source location to facilitate backtracking
 	if *acmeFlag {
 		fmt.Printf("\t%s:#%d\n", afile.name, afile.runeOffset)
 	}
-	ident, ok := o.(*ast.Ident)
-	if !ok {
-		return // DO NOT SUBMIT
-		fail("no identifier found")
-	}
-	obj := lpkgs[0].TypesInfo.ObjectOf(ident)
-	if obj == nil {
-		fail("no object")
-	}
-	done(lpkgs[0].Fset, obj, func(p *types.Package) string {
+
+	return done(fset, obj, func(p *types.Package) string {
 		//TODO: this matches existing behaviour, but we can do better.
 		//The previous code had the following TODO in it that now belongs here
 		// TODO print path package when appropriate.
@@ -174,6 +154,39 @@ func main() {
 		//	the type is not relative to the package.
 		return ""
 	})
+}
+
+func godef(cfg *packages.Config, filename string, src []byte, searchpos int) (*token.FileSet, types.Object, error) {
+	parser, result := parseFile(filename, src, searchpos)
+	// Load, parse, and type-check the packages named on the command line.
+	cfg.Mode = packages.LoadSyntax
+	cfg.ParseFile = parser
+	lpkgs, err := packages.Load(cfg, "contains:"+filename)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(lpkgs) < 1 {
+		return nil, nil, fmt.Errorf("There must be at least one package that contains the file")
+	}
+	// get the node
+	var o ast.Node
+	select {
+	case o = <-result:
+	default:
+		return nil, nil, fmt.Errorf("no node found at search pos %d", searchpos)
+	}
+	if o == nil {
+		return nil, nil, fmt.Errorf("Offset %d was not a valid location", searchpos)
+	}
+	ident, ok := o.(*ast.Ident)
+	if !ok {
+		return nil, nil, fmt.Errorf("no identifier found")
+	}
+	obj := lpkgs[0].TypesInfo.ObjectOf(ident)
+	if obj == nil {
+		return nil, nil, fmt.Errorf("no object")
+	}
+	return lpkgs[0].Fset, obj, nil
 }
 
 // parseFile returns a function that can be used as a Parser in packages.Config.
@@ -198,7 +211,7 @@ func parseFile(filename string, src []byte, searchpos int) (func(*token.FileSet,
 		} else {
 			var err error
 			if filedata, err = ioutil.ReadFile(fname); err != nil {
-				fail("cannot read %s: %v", fname, err)
+				return nil, fmt.Errorf("cannot read %s: %v", fname, err)
 			}
 		}
 		file, err := parser.ParseFile(fset, fname, filedata, 0)
@@ -243,7 +256,7 @@ func (o orderedObjects) Less(i, j int) bool { return o[i].Name() < o[j].Name() }
 func (o orderedObjects) Len() int           { return len(o) }
 func (o orderedObjects) Swap(i, j int)      { o[i], o[j] = o[j], o[i] }
 
-func done(fSet *token.FileSet, obj types.Object, q types.Qualifier) {
+func done(fSet *token.FileSet, obj types.Object, q types.Qualifier) error {
 	pos := fSet.Position(obj.Pos())
 	if *jsonFlag {
 		p := struct {
@@ -257,15 +270,15 @@ func done(fSet *token.FileSet, obj types.Object, q types.Qualifier) {
 		}
 		jsonStr, err := json.Marshal(p)
 		if err != nil {
-			fail("JSON marshal error: %v", err)
+			return fmt.Errorf("JSON marshal error: %v", err)
 		}
 		fmt.Printf("%s\n", jsonStr)
-		return
+		return nil
 	} else {
 		fmt.Printf("%v\n", posToString(pos))
 	}
 	if !*tflag {
-		return
+		return nil
 	}
 	fmt.Printf("%s\n", typeStr(obj, q))
 	if *aflag || *Aflag {
@@ -280,6 +293,7 @@ func done(fSet *token.FileSet, obj types.Object, q types.Qualifier) {
 			fmt.Printf("\t\t%v\n", posToString(fSet.Position(obj.Pos())))
 		}
 	}
+	return nil
 }
 
 func typeStr(obj types.Object, q types.Qualifier) string {
