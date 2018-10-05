@@ -205,15 +205,21 @@ func parseFile(filename string, src []byte, searchpos int) (func(*token.FileSet,
 		if file == nil {
 			return nil, err
 		}
+
 		var keepFunc *ast.FuncDecl
 		if isInputFile {
-			pos := file.Pos() + token.Pos(searchpos)
-			if pos > file.End() {
-				return file, fmt.Errorf("cursor %d is beyond end of file %s (%d)", searchpos, fname, file.End()-file.Pos())
+			tfile := fset.File(file.Pos())
+			if tfile == nil {
+				return nil, fmt.Errorf("invalid file position")
 			}
+			if searchpos > tfile.Size() {
+				return file, fmt.Errorf("cursor %d is beyond end of file %s (%d)", searchpos, fname, tfile.Size())
+			}
+
+			pos := tfile.Pos(searchpos)
 			path, _ := astutil.PathEnclosingInterval(file, pos, pos)
 			if len(path) < 1 {
-				return nil, fmt.Errorf("Offest was not a valid token")
+				return nil, fmt.Errorf("offset was not a valid token")
 			}
 			// report the base node we matched
 			result <- path[0]
