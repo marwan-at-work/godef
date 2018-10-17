@@ -1,50 +1,34 @@
 package main
 
 import (
-	"go/build"
 	"go/token"
 	"io/ioutil"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
-	"github.com/rogpeppe/godef/go/types"
 	"golang.org/x/tools/go/packages/packagestest"
 )
 
 func TestGoDef(t *testing.T) { packagestest.TestAll(t, testGoDef) }
 func testGoDef(t *testing.T, exporter packagestest.Exporter) {
-	const godefAction = ">"
+	const expectedGodefCount = 15
 	modules := []packagestest.Module{{
 		Name:  "github.com/rogpeppe/godef",
 		Files: packagestest.MustCopyFileTree("testdata"),
 	}}
 	exported := packagestest.Export(t, exporter, modules)
 	defer exported.Cleanup()
-
 	posStr := func(p token.Position) string {
 		return localPos(p, exported, modules)
 	}
-
-	const gopathPrefix = "GOPATH="
-	const gorootPrefix = "GOROOT="
-	for _, v := range exported.Config.Env {
-		if strings.HasPrefix(v, gopathPrefix) {
-			build.Default.GOPATH = v[len(gopathPrefix):]
-		}
-		if strings.HasPrefix(v, gorootPrefix) {
-			build.Default.GOROOT = v[len(gorootPrefix):]
-		}
-	}
-
 	count := 0
-	exported.Expect(map[string]interface{}{
+	if err := exported.Expect(map[string]interface{}{
 		"godef": func(src, target token.Position) {
 			count++
 			input, err := ioutil.ReadFile(src.Filename)
 			if err != nil {
-				t.Errorf("Failed %v: %v", src, err)
+				t.Fatalf("cannot read source: %v", err)
 				return
 			}
 			// There's a "saved" version of the file, so
@@ -65,25 +49,21 @@ func testGoDef(t *testing.T, exporter packagestest.Exporter) {
 				}
 				defer ioutil.WriteFile(src.Filename, input, 0666)
 			}
-			obj, _, err := godef(src.Filename, input, src.Offset)
+			fSet, obj, err := godef(exported.Config, src.Filename, input, src.Offset)
 			if err != nil {
-				t.Errorf("Failed %v: %v", src, err)
+				t.Errorf("godef error %v: %v", posStr(src), err)
 				return
 			}
-			pos := types.FileSet.Position(types.DeclPos(obj))
-			check := token.Position{
-				Filename: pos.Filename,
-				Line:     pos.Line,
-				Column:   pos.Column,
-				Offset:   pos.Offset,
-			}
-			if posStr(check) != posStr(target) {
-				t.Errorf("Got %v expected %v", posStr(check), posStr(target))
+			pos := objToPos(fSet, obj)
+			if pos.String() != target.String() {
+				t.Errorf("unexpected result %v -> %v want %v", posStr(src), posStr(pos), posStr(target))
 			}
 		},
-	})
-	if count == 0 {
-		t.Fatalf("No godef tests were run")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if count != expectedGodefCount {
+		t.Fatalf("expected %d godef tests, got %d", expectedGodefCount, count)
 	}
 }
 

@@ -20,3 +20,4 @@ func Bar() {
 	x.F2      //@godef("F2", S2F2)
 	x.S2.F1   //@godef("F1", S2F1)
 }
+
