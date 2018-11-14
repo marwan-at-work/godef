@@ -133,7 +133,7 @@ func main() {
 		Tests:     strings.HasSuffix(filename, "_test.go"),
 		ParseFile: parser,
 	}
-	lpkgs, err := packages.Load(cfg, "contains:"+filename)
+	lpkgs, err := packages.Load(cfg, "file="+filename)
 	if err != nil {
 		fail("%v", err)
 	}
